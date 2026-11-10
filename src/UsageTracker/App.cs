@@ -550,14 +550,7 @@ internal sealed class App : IDisposable
 
         var rows = shown.Select(s => new BandRow(s.Kind, s.DisplayName, s.Reading?.Session, s.Reading?.Weekly, Stale(s), Attention(s))).ToArray();
 
-        var tooltip = Format.Tooltip(snapshots, now, zone, culture);
-        if (_makeRoom && _reserver.Failure is not null)
-        {
-            tooltip += "\r\n\r\nCouldn't make room in the taskbar here, so the widget shrinks when apps need the space.";
-        }
-
-        tooltip += "\r\n\r\nClick for details, right-click for options.";
-        _band?.SetContent(rows, tooltip, BandPalette.For(_lightTaskbar));
+        _band?.SetContent(rows, BandPalette.For(_lightTaskbar));
 
         var panel = shown.Select(s =>
         {

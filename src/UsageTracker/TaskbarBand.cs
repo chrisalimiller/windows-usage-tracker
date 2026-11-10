@@ -23,7 +23,6 @@ internal sealed class TaskbarBand : IDisposable
 
     private IntPtr _hwnd;
     private IntPtr _taskbar;
-    private IntPtr _tooltip;
     private bool _destroying;
     private bool _trackingMouse;
     private bool _hover;
@@ -35,7 +34,6 @@ internal sealed class TaskbarBand : IDisposable
     private int[]? _backing;
     private bool _hidden;
     private RECT _screenRect;
-    private string _tooltipText = string.Empty;
     private BandPalette _palette = BandPalette.For(lightTaskbar: false);
 
     // Last applied geometry, so the layout timer only moves/redraws on change.
@@ -98,16 +96,11 @@ internal sealed class TaskbarBand : IDisposable
         _hwnd != IntPtr.Zero && taskbar != IntPtr.Zero && _taskbar == taskbar
         && IsWindow(_hwnd) && GetParent(_hwnd) == taskbar;
 
-    public void SetContent(IReadOnlyList<BandRow> rows, string tooltip, BandPalette palette)
+    public void SetContent(IReadOnlyList<BandRow> rows, BandPalette palette)
     {
         _rows = rows;
         _palette = palette;
         _needsRender = true;
-        if (tooltip != _tooltipText)
-        {
-            _tooltipText = tooltip;
-            UpdateTooltipText();
-        }
 
         if (_hwnd != IntPtr.Zero) UpdateLayout(force: false);
     }
@@ -158,7 +151,6 @@ internal sealed class TaskbarBand : IDisposable
         _needsRender = true;
         _loggedZOrder = false;
 
-        CreateTooltip();
         UpdateLayout(force: true);
         ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
         Log.Info($"Embedded in taskbar 0x{taskbar.ToInt64():X} as child window 0x{_hwnd.ToInt64():X}");
@@ -347,57 +339,6 @@ internal sealed class TaskbarBand : IDisposable
         }
     }
 
-    private void CreateTooltip()
-    {
-        _tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASS, null, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
-            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, _owner, IntPtr.Zero, _instance, IntPtr.Zero);
-        if (_tooltip == IntPtr.Zero)
-        {
-            Log.Error($"Couldn't create the tooltip (error {Marshal.GetLastWin32Error()})");
-            return;
-        }
-
-        var text = Marshal.StringToHGlobalUni(_tooltipText.Length == 0 ? "Windows Usage Tracker" : _tooltipText);
-        try
-        {
-            var info = ToolInfo(text);
-            SendMessageW(_tooltip, TTM_ADDTOOLW, IntPtr.Zero, ref info);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(text);
-        }
-
-        SendMessageW(_tooltip, TTM_SETMAXTIPWIDTH, IntPtr.Zero, new IntPtr(800));
-        SendMessageW(_tooltip, TTM_SETDELAYTIME, new IntPtr(TTDT_AUTOPOP), new IntPtr(30000));
-    }
-
-    private void UpdateTooltipText()
-    {
-        if (_tooltip == IntPtr.Zero) return;
-        var text = Marshal.StringToHGlobalUni(_tooltipText);
-        try
-        {
-            var info = ToolInfo(text);
-            SendMessageW(_tooltip, TTM_UPDATETIPTEXTW, IntPtr.Zero, ref info);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(text);
-        }
-    }
-
-    private TOOLINFO ToolInfo(IntPtr text) => new()
-    {
-        cbSize = (uint)Marshal.SizeOf<TOOLINFO>(),
-        uFlags = TTF_IDISHWND | TTF_SUBCLASS,
-        // Notifications go to our own hidden window, never to Explorer's taskbar.
-        hwnd = _owner,
-        uId = (UIntPtr)(ulong)_hwnd.ToInt64(),
-        hinst = _instance,
-        lpszText = text,
-    };
-
     /// <summary>Window procedure for the band window class.</summary>
     public IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
@@ -459,7 +400,6 @@ internal sealed class TaskbarBand : IDisposable
                     Log.Info("Widget window was destroyed by its parent (Explorer restarted?)");
                     _hwnd = IntPtr.Zero;
                     _taskbar = IntPtr.Zero;
-                    DestroyTooltip();
                     Lost?.Invoke();
                 }
 
@@ -469,18 +409,8 @@ internal sealed class TaskbarBand : IDisposable
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
-    private void DestroyTooltip()
-    {
-        if (_tooltip != IntPtr.Zero)
-        {
-            DestroyWindow(_tooltip);
-            _tooltip = IntPtr.Zero;
-        }
-    }
-
     public void Destroy()
     {
-        DestroyTooltip();
         if (_hwnd != IntPtr.Zero)
         {
             _destroying = true;

@@ -13,7 +13,7 @@ Codex   5h ▱▱▱▱▱  0%  7d ▰▱▱▱▱ 14%
   turn amber at 70% and red at 90%.
 - **Click** for a details panel above the taskbar: bigger bars with a pace marker (where even use
   would put you right now), reset times, plan, and the last five hours of 5-hour usage.
-- Hover for the same details as a tooltip; right-click for **Show details**, **Refresh now**,
+- Right-click for **Show details**, **Refresh now**,
   **Make room in the taskbar**, **Start with Windows**, **Open log folder** and **Exit**.
 - Keeps clear of your app buttons (see below), and follows light and dark taskbars, display
   scaling, taskbar size changes and Explorer restarts.
@@ -74,13 +74,13 @@ It's a single self-contained exe (about 35 MB); no .NET install is needed. Only 
 - The first sign-in that hasn't expired wins. WSL is only checked when the Windows file is
   missing or expired, because opening `\\wsl.localhost\…` can start a distro.
 - The app never refreshes or writes tokens. Claude Code and Codex refresh their own sign-ins
-  when you use them; if a token has expired the label turns amber and the tooltip says to run
-  the CLI once.
+  when you use them; if a token has expired the label turns amber and the details panel says to
+  run the CLI once.
 - It polls every 90 seconds, backs off up to 15 minutes on errors, and honors `Retry-After`.
 - No telemetry and no server of its own. Tokens go only to the two endpoints above.
 - **Both endpoints are undocumented** and can change without notice. Each lives in one place
   (`src/UsageTracker.Core/Providers.cs` and the two parsers) so it's easy to fix if it breaks;
-  when a response can't be understood the tooltip says so.
+  when a response can't be understood the details panel says so.
 
 ## Troubleshooting
 
