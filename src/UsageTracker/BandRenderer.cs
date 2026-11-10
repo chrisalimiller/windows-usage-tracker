@@ -42,7 +42,11 @@ internal sealed record BandPalette(Color Text, Color Muted, Color Warning, Color
 }
 
 /// <summary>How the widget is drawn this time.</summary>
-internal sealed record BandStyle(bool Compact, bool Hover, Color? Backing, Color? TopLine);
+/// <param name="Backing">
+/// Opaque background colors, one per row from the top (scaled to the widget's height), copied from
+/// the taskbar so the freed strip looks like the rest of it; null to stay transparent.
+/// </param>
+internal sealed record BandStyle(bool Compact, bool Hover, int[]? Backing);
 
 /// <summary>
 /// Draws the widget into a premultiplied 32-bit pixel buffer for UpdateLayeredWindow.
@@ -85,6 +89,24 @@ internal sealed class BandRenderer : IDisposable
 
     private static float RingDiameter(int height, float scale) => Math.Min(30 * scale, height - 10 * scale);
 
+    private static void FillRows(Graphics g, int[] colors, int width, int height)
+    {
+        var smoothing = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.None;
+        var start = 0;
+        while (start < height)
+        {
+            var color = colors[Math.Min(colors.Length - 1, start * colors.Length / height)];
+            var end = start + 1;
+            while (end < height && colors[Math.Min(colors.Length - 1, end * colors.Length / height)] == color) end++;
+            using var brush = new SolidBrush(Color.FromArgb(color));
+            g.FillRectangle(brush, 0, start, width, end - start);
+            start = end;
+        }
+
+        g.SmoothingMode = smoothing;
+    }
+
     /// <summary>Renders and returns premultiplied BGRA pixels, top-down, width * height.</summary>
     public uint[] Render(IReadOnlyList<BandRow> rows, int width, int height, float scale, BandPalette palette, BandStyle style)
     {
@@ -98,16 +120,7 @@ internal sealed class BandRenderer : IDisposable
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
-                if (style.Backing is { } backing)
-                {
-                    using var fill = new SolidBrush(backing);
-                    g.FillRectangle(fill, 0, 0, width, height);
-                    if (style.TopLine is { } line)
-                    {
-                        using var pen = new SolidBrush(line);
-                        g.FillRectangle(pen, 0, 0, width, Math.Max(1, (int)Math.Round(scale)));
-                    }
-                }
+                if (style.Backing is { Length: > 0 } backing) FillRows(g, backing, width, height);
 
                 var contentWidth = style.Compact ? MeasureCompactWidth(rows, height, scale) : MeasureWidth(rows, height, scale);
                 var offset = Math.Max(0, (width - contentWidth) / 2f);

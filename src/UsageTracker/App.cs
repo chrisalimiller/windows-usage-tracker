@@ -75,9 +75,8 @@ internal sealed class App : IDisposable
     private uint _hookedPid;
     private DateTime _stripSince = DateTime.MinValue;
     private DateTime _lastSample = DateTime.MinValue;
-    private bool _backingDecided;
-    private Color? _backing;
-    private Color? _topLine;
+    private int[]? _backing;
+    private int[]? _candidate;
 
     public App()
     {
@@ -358,7 +357,7 @@ internal sealed class App : IDisposable
                         SampleBacking(g, strip);
                         _fit = BandFit.Full;
                         HideSpaceTray();
-                        _band.SetPlacement(strip, BandFit.Full, _backing, _topLine);
+                        _band.SetPlacement(strip, BandFit.Full, _backing);
                         _band.UpdateLayout(force: false);
                         return;
                     }
@@ -408,7 +407,7 @@ internal sealed class App : IDisposable
             HideSpaceTray();
         }
 
-        _band.SetPlacement(null, fit, null, null);
+        _band.SetPlacement(null, fit, null);
         _band.UpdateLayout(force: false);
     }
 
@@ -418,52 +417,60 @@ internal sealed class App : IDisposable
     }
 
     /// <summary>
-    /// The freed strip may not show the taskbar's background (Windows 11 draws it inside the
-    /// content we narrowed). Compare the strip with the taskbar just left of it and, if they
-    /// differ, paint the widget's background in the taskbar's color.
+    /// Windows 11 draws the taskbar's background (its tinted, blurred material and the thin line
+    /// along the top) inside the content we narrowed, so the freed strip doesn't show it. Copy the
+    /// taskbar's background from just left of the strip, one row at a time, and paint it behind
+    /// the widget so the bar carries on without a seam. Re-sampled every couple of seconds so it
+    /// follows theme, accent and wallpaper changes.
     /// </summary>
     private void SampleBacking(TaskbarGeometry g, RECT strip)
     {
         var now = DateTime.UtcNow;
-        if (now - _stripSince < TimeSpan.FromSeconds(2) || now - _lastSample < TimeSpan.FromSeconds(2)) return;
+        if (now - _stripSince < TimeSpan.FromSeconds(1) || now - _lastSample < TimeSpan.FromSeconds(2)) return;
         _lastSample = now;
 
+        // The last few pixels of the taskbar content, past the clock: nothing but background there.
         var s = g.Scale;
-        var y = g.TaskbarRect.Top + (int)Math.Round(4 * s);
-        var h = Math.Max(2, (int)Math.Round(4 * s));
-        var taskbarColor = ScreenSampler.Average(strip.Left - (int)Math.Round(10 * s), y, Math.Max(2, (int)Math.Round(6 * s)), h);
-        if (taskbarColor is not { } bg) return;
+        var width = Math.Max(2, (int)Math.Round(3 * s));
+        var x = strip.Left - (int)Math.Round(2 * s) - width;
+        var tb = g.TaskbarRect;
+        if (ScreenSampler.Rows(x, tb.Top, width, tb.Height) is not { } rows) return;
 
-        if (!_backingDecided)
+        if (_backing is not null && ScreenSampler.Distance(rows, _backing) <= 2)
         {
-            // Our own pixels are almost fully transparent here, so this reads what's behind the strip.
-            var stripColor = ScreenSampler.Average(strip.Left + 1, y, Math.Max(2, (int)Math.Round(4 * s)), h);
-            if (stripColor is not { } behind) return;
-            var distance = ScreenSampler.Distance(bg, behind);
-            _backingDecided = true;
-            Log.Info($"Make room: taskbar color {Hex(bg)}, freed strip shows {Hex(behind)} (difference {distance}); {(distance > 20 ? "painting the taskbar color behind the widget" : "leaving it transparent")}");
-            if (distance <= 20) return;
-        }
-        else if (_backing is null)
-        {
+            _candidate = null;
             return;
         }
 
-        var line = ScreenSampler.Average(strip.Left - (int)Math.Round(10 * s), g.TaskbarRect.Top, Math.Max(2, (int)Math.Round(6 * s)), 1);
-        if (_backing is not { } old || ScreenSampler.Distance(old, bg) > 3 || line != _topLine)
+        // Only switch after seeing the same thing twice, so a tooltip or hover highlight passing
+        // over the sampled pixels doesn't get copied.
+        if (_candidate is null || ScreenSampler.Distance(rows, _candidate) > 6)
         {
-            _backing = bg;
-            _topLine = line;
+            _candidate = rows;
+            return;
         }
+
+        if (_backing is null)
+        {
+            Log.Info($"Make room: copying the taskbar's background behind the widget (top {Hex(rows[0])}, middle {Hex(rows[rows.Length / 2])}, bottom {Hex(rows[^1])})");
+        }
+        else
+        {
+            Log.Verbose($"Make room: taskbar background changed (middle {Hex(rows[rows.Length / 2])})");
+        }
+
+        _backing = rows;
+        _candidate = null;
     }
 
     private void ResetBacking()
     {
-        _backingDecided = false;
         _backing = null;
-        _topLine = null;
+        _candidate = null;
         _stripSince = DateTime.MinValue;
     }
+
+    private static string Hex(int argb) => Hex(Color.FromArgb(argb));
 
     private static string Hex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
 

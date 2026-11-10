@@ -32,8 +32,7 @@ internal sealed class TaskbarBand : IDisposable
     private IReadOnlyList<BandRow> _rows = Array.Empty<BandRow>();
     private RECT? _strip;
     private BandFit _fit = BandFit.Full;
-    private Color? _backing;
-    private Color? _topLine;
+    private int[]? _backing;
     private bool _hidden;
     private RECT _screenRect;
     private string _tooltipText = string.Empty;
@@ -77,15 +76,15 @@ internal sealed class TaskbarBand : IDisposable
     /// Where to sit: a reserved strip at the right end of the taskbar ("make room"), or null to
     /// sit just left of the tray in the given form ("dodge").
     /// </summary>
-    public void SetPlacement(RECT? strip, BandFit fit, Color? backing, Color? topLine)
+    public void SetPlacement(RECT? strip, BandFit fit, int[]? backing)
     {
         if (strip is { } s && s.Width <= 0) strip = null;
-        var changed = !SameNullable(strip, _strip) || fit != _fit || backing != _backing || topLine != _topLine;
+        if (strip is null) backing = null;
+        var changed = !SameNullable(strip, _strip) || fit != _fit || !ReferenceEquals(backing, _backing);
         _strip = strip;
         _fit = strip is null ? fit : BandFit.Full;
-        if (backing != _backing || topLine != _topLine) _needsRender = true;
-        _backing = strip is null ? null : backing;
-        _topLine = strip is null ? null : topLine;
+        if (!ReferenceEquals(backing, _backing)) _needsRender = true;
+        _backing = backing;
         if (changed && _hwnd != IntPtr.Zero) UpdateLayout(force: false);
     }
 
@@ -290,7 +289,7 @@ internal sealed class TaskbarBand : IDisposable
     private void Present(int width, int height, float scale)
     {
         if (width <= 0 || height <= 0) return;
-        var style = new BandStyle(Compact: _strip is null && _fit == BandFit.Compact, _hover, _backing, _topLine);
+        var style = new BandStyle(Compact: _strip is null && _fit == BandFit.Compact, _hover, _backing);
         var pixels = _renderer.Render(_rows, width, height, scale, _palette, style);
 
         var screenDc = GetDC(IntPtr.Zero);

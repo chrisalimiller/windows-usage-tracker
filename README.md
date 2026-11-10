@@ -24,8 +24,10 @@ reserve space there, so the tracker does two things:
 
 1. **Make room** (on by default). It narrows the window Windows draws the taskbar's buttons, tray
    and clock in, so they lay out in slightly less space, and puts the widget in the strip that
-   frees up at the right end, past the clock. If the strip doesn't show the taskbar's background,
-   the widget paints the taskbar's color behind itself. This isn't an official Windows feature:
+   frees up at the right end, past the clock. Windows draws the taskbar's background inside the
+   window it narrowed, so the widget copies that background (row by row, including the thin top
+   line) from just left of the strip and paints it behind itself, so the bar carries on without a
+   seam. It re-checks every couple of seconds to follow theme and wallpaper changes. This isn't an official Windows feature:
    if Explorer keeps undoing it, or the buttons get cut off instead of rearranging, the tracker
    puts the taskbar back exactly as it was and switches to dodging. Exiting the tracker also puts
    it back.
@@ -100,7 +102,8 @@ Useful lines:
 
 - `Embedded in taskbar 0x… as child window 0x…` means the widget is a child of `Shell_TrayWnd`.
 - `Make room: narrowing taskbar content … from …px to …px` means make room is active;
-  `Make room: taskbar color …, freed strip shows …` says whether it painted a background.
+  `Make room: copying the taskbar's background behind the widget (top …, middle …, bottom …)` shows
+  the colors it copied into the freed strip.
 - `Make room isn't working here, so the widget will dodge app buttons instead: …` gives the reason
   it gave up (it restores the taskbar first).
 - `Taskbar probe: found N buttons …` means it can see the taskbar's buttons (needed for dodging).
