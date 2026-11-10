@@ -144,6 +144,17 @@ internal delegate IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lP
 
 internal delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
+internal delegate void WinEventProc(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint eventThread, uint eventTime);
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct MONITORINFO
+{
+    public uint cbSize;
+    public RECT rcMonitor;
+    public RECT rcWork;
+    public uint dwFlags;
+}
+
 internal static class Win32
 {
     // Window styles
@@ -168,6 +179,9 @@ internal static class Win32
     public const uint SWP_NOACTIVATE = 0x0010;
     public const uint SWP_FRAMECHANGED = 0x0020;
     public const uint SWP_SHOWWINDOW = 0x0040;
+    public const uint SWP_NOOWNERZORDER = 0x0200;
+    public const uint SWP_ASYNCWINDOWPOS = 0x4000;
+    public static readonly IntPtr HWND_TOPMOST = new(-1);
     public const int SW_HIDE = 0;
     public const int SW_SHOWNOACTIVATE = 4;
     public const uint GW_HWNDPREV = 3;
@@ -175,6 +189,7 @@ internal static class Win32
     // Messages
     public const uint WM_NULL = 0x0000;
     public const uint WM_DESTROY = 0x0002;
+    public const uint WM_ACTIVATE = 0x0006;
     public const uint WM_CLOSE = 0x0010;
     public const uint WM_QUERYENDSESSION = 0x0011;
     public const uint WM_ENDSESSION = 0x0016;
@@ -183,6 +198,7 @@ internal static class Win32
     public const uint WM_DISPLAYCHANGE = 0x007E;
     public const uint WM_CONTEXTMENU = 0x007B;
     public const uint WM_NCHITTEST = 0x0084;
+    public const uint WM_KEYDOWN = 0x0100;
     public const uint WM_TIMER = 0x0113;
     public const uint WM_MOUSEMOVE = 0x0200;
     public const uint WM_LBUTTONUP = 0x0202;
@@ -195,6 +211,18 @@ internal static class Win32
     public const uint WM_APP = 0x8000;
     public const int MA_NOACTIVATE = 3;
     public const int HTCLIENT = 1;
+    public const int WA_INACTIVE = 0;
+    public const int VK_ESCAPE = 0x1B;
+
+    // WinEvents
+    public const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
+    public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+    public const int OBJID_WINDOW = 0;
+
+    // Monitors and screen capture
+    public const uint MONITOR_DEFAULTTONEAREST = 2;
+    public const uint SRCCOPY = 0x00CC0020;
 
     // Layered windows / GDI
     public const uint ULW_ALPHA = 0x00000002;
@@ -241,6 +269,7 @@ internal static class Win32
     public const uint NIF_INFO = 0x10;
     public const uint NIIF_WARNING = 0x02;
     public static readonly IntPtr IDI_WARNING = new(32515);
+    public static readonly IntPtr IDI_INFORMATION = new(32516);
     public static readonly IntPtr IDC_ARROW = new(32512);
 
     // Message boxes
@@ -443,6 +472,28 @@ internal static class Win32
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr GetModuleHandleW(string? moduleName);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr module, WinEventProc callback,
+        uint processId, uint threadId, uint flags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool UnhookWinEvent(IntPtr hook);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetMonitorInfoW(IntPtr monitor, ref MONITORINFO info);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool BitBlt(IntPtr hdcDest, int x, int y, int width, int height, IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
 
     public static string ClassName(IntPtr hwnd)
     {

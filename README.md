@@ -1,18 +1,39 @@
 # Windows Usage Tracker
 
-Shows your **Claude** and **Codex** plan limits inside the Windows taskbar, just left of the
-clock and tray icons. It is not a tray icon and not a floating window.
+Shows your **Claude** and **Codex** plan limits inside the Windows taskbar. It is not a tray
+icon and not a floating window.
 
 ```
-Claude  5h 23%  7d 41%
-Codex   5h 12%  7d  8%
+Claude  5h ▰▰▰▰▱ 73%  7d ▰▰▱▱▱ 44%
+Codex   5h ▱▱▱▱▱  0%  7d ▰▱▱▱▱ 14%
 ```
 
-- **5h** is the rolling 5-hour session limit, **7d** the weekly limit (percent used).
-- Numbers turn amber at 70% and red at 90%.
-- Hover for exact numbers, reset times and plan; double-click to refresh; right-click for
-  **Refresh now**, **Start with Windows**, **Open log folder** and **Exit**.
-- Follows light and dark taskbars, display scaling, taskbar size changes and Explorer restarts.
+- **5h** is the rolling 5-hour session limit, **7d** the weekly limit (percent used), each with a
+  small meter bar. Numbers and bars turn amber at 70% and red at 90%.
+- **Click** for a details panel above the taskbar: bigger bars with a pace marker (where even use
+  would put you right now), reset times, plan, and the last five hours of 5-hour usage.
+- Hover for the same details as a tooltip; right-click for **Show details**, **Refresh now**,
+  **Make room in the taskbar**, **Start with Windows**, **Open log folder** and **Exit**.
+- Keeps clear of your app buttons (see below), and follows light and dark taskbars, display
+  scaling, taskbar size changes and Explorer restarts.
+
+### Keeping clear of app buttons
+
+Windows 11 lays app buttons out across the whole taskbar and has no supported way for an app to
+reserve space there, so the tracker does two things:
+
+1. **Make room** (on by default). It narrows the window Windows draws the taskbar's buttons, tray
+   and clock in, so they lay out in slightly less space, and puts the widget in the strip that
+   frees up at the right end, past the clock. If the strip doesn't show the taskbar's background,
+   the widget paints the taskbar's color behind itself. This isn't an official Windows feature:
+   if Explorer keeps undoing it, or the buttons get cut off instead of rearranging, the tracker
+   puts the taskbar back exactly as it was and switches to dodging. Exiting the tracker also puts
+   it back.
+2. **Dodge** (the fallback, or with **Make room** unticked). The widget sits left of the tray and
+   watches where the last app button ends. When they get close it shrinks to two small rings (one
+   per provider, showing whichever limit is closer), and if even that won't fit it steps aside to
+   an icon in the notification area until there's room again. Clicking that icon opens the same
+   details panel.
 
 ## Requirements
 
@@ -33,6 +54,8 @@ A provider that isn't signed in anywhere is hidden; if neither is, both rows sho
 3. Double-click it. The exe isn't code-signed yet, so SmartScreen may warn you the first
    time: choose **More info → Run anyway**.
 4. Right-click the widget and tick **Start with Windows** if you want it at sign-in.
+
+To update, right-click → **Exit**, replace the exe, and start it again.
 
 It's a single self-contained exe (about 35 MB); no .NET install is needed. Only one copy runs at a time.
 
@@ -76,12 +99,20 @@ the computed position on each layout change, the DPI, z-order corrections and ev
 Useful lines:
 
 - `Embedded in taskbar 0x… as child window 0x…` means the widget is a child of `Shell_TrayWnd`.
-- `Layout: taskbar … tray … -> widget WxH at screen (x,y)` is where it was placed.
-- `Z-order: sibling … was above the widget; raising` means the taskbar's own content had
-  covered it and it was moved back on top.
+- `Make room: narrowing taskbar content … from …px to …px` means make room is active;
+  `Make room: taskbar color …, freed strip shows …` says whether it painted a background.
+- `Make room isn't working here, so the widget will dodge app buttons instead: …` gives the reason
+  it gave up (it restores the taskbar first).
+- `Taskbar probe: found N buttons …` means it can see the taskbar's buttons (needed for dodging).
+- `Dodge: Npx free between the app buttons and the tray; showing the widget full/compact/hidden`
+  logs each change of form.
+- `Layout: … -> widget WxH at screen (x,y)` is where it was placed.
 - `Couldn't place the widget in the taskbar: …` means embedding failed. The app then shows a
   warning icon in the notification area with the reason (it never silently floats) and keeps
   retrying every 15 seconds.
+
+If make room misbehaves on your PC, untick **Make room in the taskbar** in the right-click menu;
+the taskbar goes back to normal right away and the widget dodges instead.
 
 Tokens and response bodies are never written to the log.
 
@@ -92,12 +123,16 @@ Tokens and response bodies are never written to the log.
 - `src/UsageTracker` (Windows): plain Win32 through P/Invoke, no WinForms/WPF.
   - A hidden controller window receives Explorer's `TaskbarCreated` broadcast, display, DPI and
     theme changes, and poll results.
-  - The widget is a layered (`WS_EX_LAYERED`) child window of `Shell_TrayWnd`, positioned just
-    left of `TrayNotifyWnd` and sized to the taskbar height. It's drawn with GDI+ into a
-    premultiplied bitmap and shown with `UpdateLayeredWindow`, so the taskbar shows through.
+  - The widget is a layered (`WS_EX_LAYERED`) child window of `Shell_TrayWnd`, drawn with GDI+
+    into a premultiplied bitmap and shown with `UpdateLayeredWindow`, so the taskbar shows through.
+  - Make room (`SpaceReserver.cs`) resizes the taskbar's XAML content window
+    (`Windows.UI.Composition.DesktopWindowContentBridge`) and watches it with a WinEvent hook so it
+    can react the moment Explorer resizes it back. Dodging (`TaskbarProbe.cs`) reads the taskbar's
+    button positions through UI Automation on a background thread.
   - A one-second layout check re-attaches after Explorer restarts and follows tray width, taskbar
     size, auto-hide and DPI changes. It also keeps the widget above the Windows 11 taskbar's own
     XAML content.
+  - The details panel is a top-level layered popup that closes when it loses focus.
   - Per-monitor DPI aware (v2) and declares Windows 8+ compatibility in `app.manifest`, which
     layered child windows require.
 

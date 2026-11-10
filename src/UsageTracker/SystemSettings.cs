@@ -2,11 +2,41 @@ using Microsoft.Win32;
 
 namespace UsageTracker;
 
-/// <summary>Taskbar theme and "start with Windows", both kept in the current user's registry.</summary>
+/// <summary>Taskbar theme, "start with Windows" and the app's own settings, all in the current user's registry.</summary>
 internal static class SystemSettings
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "WindowsUsageTracker";
+    private const string AppKey = @"Software\WindowsUsageTracker";
+    private const string MakeRoomValue = "MakeRoom";
+
+    /// <summary>Whether to narrow the taskbar's own content to free a strip for the widget (on by default).</summary>
+    public static bool MakeRoom()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(AppKey);
+            return key?.GetValue(MakeRoomValue) is not int value || value != 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return true;
+        }
+    }
+
+    public static void SetMakeRoom(bool enabled)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(AppKey);
+            key.SetValue(MakeRoomValue, enabled ? 1 : 0, RegistryValueKind.DWord);
+            Log.Info($"Make room in the taskbar {(enabled ? "enabled" : "disabled")}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            Log.Error("Couldn't save the make-room setting", ex);
+        }
+    }
 
     /// <summary>
     /// The taskbar follows the Windows mode (SystemUsesLightTheme), not the app mode.

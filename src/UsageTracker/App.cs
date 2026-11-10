@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Drawing;
 using System.Globalization;
 using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
@@ -11,42 +12,80 @@ namespace UsageTracker;
 /// <summary>
 /// Owns a hidden top-level window that receives Explorer's TaskbarCreated broadcast,
 /// display and theme changes, timers and poll results, and keeps the taskbar widget
-/// attached through all of them.
+/// attached and clear of the app buttons through all of them.
 /// </summary>
+/// <remarks>
+/// Keeping clear works in two ways. "Make room" (<see cref="SpaceReserver"/>) narrows the
+/// taskbar's own content so a strip is free at the right end. If that's off or doesn't work
+/// on this PC, the widget "dodges": it reads where the app buttons end (<see cref="TaskbarProbe"/>)
+/// and shrinks to compact rings, or steps aside to a tray icon, when they get close.
+/// </remarks>
 internal sealed class App : IDisposable
 {
     private const string ControllerClass = "WindowsUsageTracker.Controller";
     private const uint DataMessage = WM_APP + 1;
+    private const uint ProbeMessage = WM_APP + 3;
     private static readonly UIntPtr LayoutTimer = new(1);
     private const uint LayoutIntervalMs = 1000;
+
+    private static readonly TimeSpan DodgeProbeInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SettledProbeInterval = TimeSpan.FromSeconds(10);
 
     private const int CmdRefresh = 1;
     private const int CmdStartup = 2;
     private const int CmdOpenLog = 3;
     private const int CmdExit = 4;
+    private const int CmdMakeRoom = 5;
+    private const int CmdDetails = 6;
 
-    // Delegates must outlive the native window classes that point at them.
+    // Delegates must outlive the native window classes and hooks that point at them.
     private readonly WndProc _controllerProc;
     private readonly WndProc _bandProc;
+    private readonly WndProc _panelProc;
+    private readonly WinEventProc _winEventProc;
     private readonly IntPtr _instance;
     private readonly uint _taskbarCreatedMessage;
     private readonly HttpClient _http;
     private readonly ProviderPoller[] _pollers;
+    private readonly Dictionary<ProviderKind, UsageHistory> _history = new()
+    {
+        [ProviderKind.Claude] = new UsageHistory(),
+        [ProviderKind.Codex] = new UsageHistory(),
+    };
+
+    private readonly SpaceReserver _reserver = new();
+    private readonly TaskbarProbe _probe = new();
 
     private IntPtr _hwnd;
     private TaskbarBand? _band;
+    private DetailsPanel? _panel;
     private TrayFallback? _tray;
     private bool _lightTaskbar;
+    private bool _makeRoom;
     private int _attachFailures;
     private DateTime _nextAttachAttempt = DateTime.MinValue;
     private string? _trayError;
     private int _ticks;
+
+    // Placement state.
+    private bool _arranging;
+    private BandFit _fit = BandFit.Full;
+    private string? _reportedFailure;
+    private IntPtr _winEventHook;
+    private uint _hookedPid;
+    private DateTime _stripSince = DateTime.MinValue;
+    private DateTime _lastSample = DateTime.MinValue;
+    private bool _backingDecided;
+    private Color? _backing;
+    private Color? _topLine;
 
     public App()
     {
         _instance = GetModuleHandleW(null);
         _controllerProc = ControllerWndProc;
         _bandProc = BandWndProc;
+        _panelProc = PanelWndProc;
+        _winEventProc = OnWinEvent;
         _taskbarCreatedMessage = RegisterWindowMessageW("TaskbarCreated");
         _http = CreateHttpClient();
         _pollers = new[]
@@ -66,7 +105,7 @@ internal sealed class App : IDisposable
         {
             Timeout = TimeSpan.FromSeconds(20),
         };
-        var version = typeof(App).Assembly.GetName().Version?.ToString(3) ?? "0.1.0";
+        var version = typeof(App).Assembly.GetName().Version?.ToString(3) ?? "0.2.0";
         http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("WindowsUsageTracker", version));
         return http;
     }
@@ -76,7 +115,9 @@ internal sealed class App : IDisposable
         var icc = new INITCOMMONCONTROLSEX { dwSize = (uint)Marshal.SizeOf<INITCOMMONCONTROLSEX>(), dwICC = ICC_WIN95_CLASSES };
         InitCommonControlsEx(ref icc);
 
-        if (!RegisterClass(ControllerClass, _controllerProc, 0) || !RegisterClass(TaskbarBand.WindowClass, _bandProc, CS_DBLCLKS))
+        if (!RegisterClass(ControllerClass, _controllerProc, 0)
+            || !RegisterClass(TaskbarBand.WindowClass, _bandProc, 0)
+            || !RegisterClass(DetailsPanel.WindowClass, _panelProc, 0))
         {
             return 1;
         }
@@ -90,12 +131,22 @@ internal sealed class App : IDisposable
             return 1;
         }
 
+        // Never leave the taskbar narrowed if we stop unexpectedly.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => _reserver.Restore();
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => _reserver.Restore();
+
         _lightTaskbar = SystemSettings.TaskbarIsLight();
+        _makeRoom = SystemSettings.MakeRoom();
         _band = new TaskbarBand(_instance, _hwnd);
         _band.ContextMenuRequested += ShowMenu;
-        _band.RefreshRequested += RefreshAll;
+        _band.Clicked += () => TogglePanel(null);
         _band.Lost += () => _nextAttachAttempt = DateTime.MinValue;
+        _panel = new DetailsPanel(_instance, _hwnd);
         _tray = new TrayFallback(_hwnd);
+
+        _probe.SetInterval(_makeRoom ? SettledProbeInterval : DodgeProbeInterval);
+        _probe.Updated += () => PostMessageW(_hwnd, ProbeMessage, IntPtr.Zero, IntPtr.Zero);
+        _probe.Start();
 
         PushContent();
         EnsureEmbedded();
@@ -135,6 +186,9 @@ internal sealed class App : IDisposable
     private IntPtr BandWndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam) =>
         _band is not null ? _band.WndProc(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
 
+    private IntPtr PanelWndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam) =>
+        _panel is not null ? _panel.WndProc(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+
     private IntPtr ControllerWndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
         try
@@ -143,7 +197,12 @@ internal sealed class App : IDisposable
             {
                 Log.Info("Explorer recreated the taskbar; re-attaching");
                 _band?.Destroy();
+                _panel?.Hide();
                 _tray?.Readd();
+                _reserver.Reset();
+                _reportedFailure = null;
+                ResetBacking();
+                Unhook();
                 _nextAttachAttempt = DateTime.MinValue;
                 _attachFailures = 0;
                 EnsureEmbedded();
@@ -162,15 +221,19 @@ internal sealed class App : IDisposable
                     PushContent();
                     return IntPtr.Zero;
 
+                case ProbeMessage:
+                    Arrange();
+                    return IntPtr.Zero;
+
                 case TrayFallback.CallbackMessage:
                     var mouse = (uint)(lParam.ToInt64() & 0xFFFF);
                     if (mouse is WM_RBUTTONUP or WM_CONTEXTMENU)
                     {
                         if (GetCursorPos(out var pt)) ShowMenu(pt);
                     }
-                    else if (mouse == WM_LBUTTONDBLCLK)
+                    else if (mouse == WM_LBUTTONUP && GetCursorPos(out var at))
                     {
-                        RefreshAll();
+                        TogglePanel(new RECT { Left = at.X, Top = at.Y, Right = at.X + 1, Bottom = at.Y + 1 });
                     }
 
                     return IntPtr.Zero;
@@ -181,6 +244,7 @@ internal sealed class App : IDisposable
                     {
                         _lightTaskbar = SystemSettings.TaskbarIsLight();
                         Log.Verbose($"Theme changed; light taskbar = {_lightTaskbar}");
+                        ResetBacking();
                         PushContent();
                     }
 
@@ -191,6 +255,7 @@ internal sealed class App : IDisposable
                 case WM_DPICHANGED:
                     Log.Verbose("Display or DPI changed");
                     _band?.UpdateLayout(force: true);
+                    Arrange();
                     return IntPtr.Zero;
 
                 case WM_QUERYENDSESSION:
@@ -225,7 +290,7 @@ internal sealed class App : IDisposable
         var taskbar = FindWindowW("Shell_TrayWnd", null);
         if (taskbar != IntPtr.Zero && _band.IsAttachedTo(taskbar))
         {
-            _band.UpdateLayout(force: false);
+            Arrange();
             return;
         }
 
@@ -243,14 +308,17 @@ internal sealed class App : IDisposable
             {
                 _attachFailures = 0;
                 _nextAttachAttempt = DateTime.MinValue;
-                if (_tray is { Visible: true })
+                if (_tray is { Visible: true, ShownForSpace: false })
                 {
                     Log.Info("Embedded after earlier failures; removing the fallback tray icon");
                     _tray.Hide();
                     _trayError = null;
                 }
 
+                Hook(taskbar);
                 PushContent();
+                Arrange();
+                _probe.ProbeSoon();
                 return;
             }
 
@@ -269,6 +337,177 @@ internal sealed class App : IDisposable
         }
     }
 
+    /// <summary>Decides where the widget goes: a freed strip ("make room") or next to the tray ("dodge").</summary>
+    private void Arrange()
+    {
+        if (_arranging || _band is null || !IsWindow(_band.Handle) || TaskbarGeometry.Read(_band.Taskbar) is not { } g) return;
+        _arranging = true;
+        try
+        {
+            var (full, _) = _band.Widths(g);
+
+            if (_makeRoom && _reserver.Failure is null)
+            {
+                var pad = (int)Math.Round(8 * g.Scale);
+                if (_reserver.Apply(g, full + 2 * pad) is { } strip)
+                {
+                    if (_probe.Latest is { } probe) _reserver.Verify(probe, strip, g.Scale);
+                    if (_reserver.Failure is null)
+                    {
+                        if (_stripSince == DateTime.MinValue) _stripSince = DateTime.UtcNow;
+                        SampleBacking(g, strip);
+                        _fit = BandFit.Full;
+                        HideSpaceTray();
+                        _band.SetPlacement(strip, BandFit.Full, _backing, _topLine);
+                        _band.UpdateLayout(force: false);
+                        return;
+                    }
+                }
+            }
+
+            _reserver.Restore();
+            _stripSince = DateTime.MinValue;
+            if (_makeRoom && _reserver.Failure is { } failure && failure != _reportedFailure)
+            {
+                _reportedFailure = failure;
+                _probe.SetInterval(DodgeProbeInterval);
+                PushContent();
+            }
+
+            Dodge(g);
+        }
+        finally
+        {
+            _arranging = false;
+        }
+    }
+
+    private void Dodge(TaskbarGeometry g)
+    {
+        if (_band is null) return;
+        var (full, compact) = _band.Widths(g);
+        var fit = BandFit.Full;
+        if (g.Horizontal && _probe.Latest is { Ok: true } probe && DateTime.UtcNow - probe.TakenAt < TimeSpan.FromSeconds(30))
+        {
+            var gap = (int)Math.Round(4 * g.Scale);
+            var margin = (int)Math.Round(6 * g.Scale);
+            var appsRight = probe.RightmostEndingBefore(g.TrayRect.Left + 1) ?? g.TaskbarRect.Left;
+            var available = g.TrayRect.Left - gap - appsRight - margin;
+            fit = UsageTracker.Core.Dodge.Decide(available, full, compact, _fit, (int)Math.Round(16 * g.Scale));
+            if (fit != _fit) Log.Info($"Dodge: {available}px free between the app buttons and the tray; showing the widget {fit.ToString().ToLowerInvariant()}");
+        }
+
+        _fit = fit;
+        if (fit == BandFit.Hidden)
+        {
+            _panel?.Hide();
+            _tray?.ShowForSpace(Format.Summary(Snapshots()));
+        }
+        else
+        {
+            HideSpaceTray();
+        }
+
+        _band.SetPlacement(null, fit, null, null);
+        _band.UpdateLayout(force: false);
+    }
+
+    private void HideSpaceTray()
+    {
+        if (_tray is { ShownForSpace: true }) _tray.Hide();
+    }
+
+    /// <summary>
+    /// The freed strip may not show the taskbar's background (Windows 11 draws it inside the
+    /// content we narrowed). Compare the strip with the taskbar just left of it and, if they
+    /// differ, paint the widget's background in the taskbar's color.
+    /// </summary>
+    private void SampleBacking(TaskbarGeometry g, RECT strip)
+    {
+        var now = DateTime.UtcNow;
+        if (now - _stripSince < TimeSpan.FromSeconds(2) || now - _lastSample < TimeSpan.FromSeconds(2)) return;
+        _lastSample = now;
+
+        var s = g.Scale;
+        var y = g.TaskbarRect.Top + (int)Math.Round(4 * s);
+        var h = Math.Max(2, (int)Math.Round(4 * s));
+        var taskbarColor = ScreenSampler.Average(strip.Left - (int)Math.Round(10 * s), y, Math.Max(2, (int)Math.Round(6 * s)), h);
+        if (taskbarColor is not { } bg) return;
+
+        if (!_backingDecided)
+        {
+            // Our own pixels are almost fully transparent here, so this reads what's behind the strip.
+            var stripColor = ScreenSampler.Average(strip.Left + 1, y, Math.Max(2, (int)Math.Round(4 * s)), h);
+            if (stripColor is not { } behind) return;
+            var distance = ScreenSampler.Distance(bg, behind);
+            _backingDecided = true;
+            Log.Info($"Make room: taskbar color {Hex(bg)}, freed strip shows {Hex(behind)} (difference {distance}); {(distance > 20 ? "painting the taskbar color behind the widget" : "leaving it transparent")}");
+            if (distance <= 20) return;
+        }
+        else if (_backing is null)
+        {
+            return;
+        }
+
+        var line = ScreenSampler.Average(strip.Left - (int)Math.Round(10 * s), g.TaskbarRect.Top, Math.Max(2, (int)Math.Round(6 * s)), 1);
+        if (_backing is not { } old || ScreenSampler.Distance(old, bg) > 3 || line != _topLine)
+        {
+            _backing = bg;
+            _topLine = line;
+        }
+    }
+
+    private void ResetBacking()
+    {
+        _backingDecided = false;
+        _backing = null;
+        _topLine = null;
+        _stripSince = DateTime.MinValue;
+    }
+
+    private static string Hex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+
+    /// <summary>Re-arranges the moment Explorer resizes its taskbar content, rather than up to a second later.</summary>
+    private void Hook(IntPtr taskbar)
+    {
+        GetWindowThreadProcessId(taskbar, out var pid);
+        if (pid == 0 || (pid == _hookedPid && _winEventHook != IntPtr.Zero)) return;
+        Unhook();
+        _winEventHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, IntPtr.Zero, _winEventProc,
+            pid, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        _hookedPid = _winEventHook != IntPtr.Zero ? pid : 0;
+        if (_winEventHook == IntPtr.Zero) Log.Verbose("Couldn't watch the taskbar for resizes; relying on the 1-second check");
+    }
+
+    private void Unhook()
+    {
+        if (_winEventHook != IntPtr.Zero) UnhookWinEvent(_winEventHook);
+        _winEventHook = IntPtr.Zero;
+        _hookedPid = 0;
+    }
+
+    private void OnWinEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
+    {
+        try
+        {
+            if (idObject != OBJID_WINDOW || idChild != 0 || hwnd == IntPtr.Zero) return;
+            if (hwnd == _reserver.Content || (_band is not null && hwnd == _band.Taskbar)) Arrange();
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Error handling a taskbar resize", ex);
+        }
+    }
+
+    private void TogglePanel(RECT? anchor)
+    {
+        if (_panel is null || _band is null) return;
+        var at = anchor ?? _band.ScreenRect;
+        if (at.Width <= 0) return;
+        PushContent();
+        _panel.Toggle(at, _band.Taskbar != IntPtr.Zero ? _band.Taskbar : FindWindowW("Shell_TrayWnd", null));
+    }
+
     private static void DumpTaskbar(IntPtr taskbar)
     {
         GetWindowThreadProcessId(taskbar, out var pid);
@@ -282,28 +521,60 @@ internal sealed class App : IDisposable
 
     private IReadOnlyList<ProviderSnapshot> Snapshots() => _pollers.Select(p => p.Snapshot).ToArray();
 
-    /// <summary>Sends the latest readings to the widget and the fallback icon.</summary>
+    /// <summary>Sends the latest readings to the widget, the details panel and the tray icon.</summary>
     private void PushContent()
     {
         var now = DateTimeOffset.UtcNow;
+        var zone = TimeZoneInfo.Local;
+        var culture = CultureInfo.CurrentCulture;
         var snapshots = Snapshots();
+
+        foreach (var s in snapshots)
+        {
+            if (s.Reading?.Session is { } session && s.ReadingFetchedAt is { } fetched) _history[s.Kind].Add(fetched, session.UsedPercent);
+        }
 
         // Hide a provider that isn't signed in at all, unless that would leave nothing.
         var shown = snapshots.Where(s => s.Status is not (ProviderStatus.NotSignedIn or ProviderStatus.Unsupported)).ToArray();
         if (shown.Length == 0) shown = snapshots.ToArray();
 
-        var rows = shown.Select(s => new BandRow(
-            s.DisplayName,
-            s.Reading?.Session,
-            s.Reading?.Weekly,
-            Dim: s.ReadingFetchedAt is not { } at || now - at > Format.StaleAfter,
-            NeedsAttention: s.Status is ProviderStatus.TokenExpired or ProviderStatus.Unauthorized or ProviderStatus.BadResponse)).ToArray();
+        bool Stale(ProviderSnapshot s) => s.ReadingFetchedAt is not { } at || now - at > Format.StaleAfter;
+        bool Attention(ProviderSnapshot s) => s.Status is ProviderStatus.TokenExpired or ProviderStatus.Unauthorized or ProviderStatus.BadResponse;
 
-        var tooltip = Format.Tooltip(snapshots, now, TimeZoneInfo.Local, CultureInfo.CurrentCulture)
-            + "\r\n\r\nDouble-click to refresh, right-click for options.";
+        var rows = shown.Select(s => new BandRow(s.Kind, s.DisplayName, s.Reading?.Session, s.Reading?.Weekly, Stale(s), Attention(s))).ToArray();
 
+        var tooltip = Format.Tooltip(snapshots, now, zone, culture);
+        if (_makeRoom && _reserver.Failure is not null)
+        {
+            tooltip += "\r\n\r\nCouldn't make room in the taskbar here, so the widget shrinks when apps need the space.";
+        }
+
+        tooltip += "\r\n\r\nClick for details, right-click for options.";
         _band?.SetContent(rows, tooltip, BandPalette.For(_lightTaskbar));
+
+        var panel = shown.Select(s =>
+        {
+            var r = s.Reading;
+            var detail = string.Join(" · ", new[]
+            {
+                r?.PlanLabel,
+                s.ReadingFetchedAt is { } f ? "updated " + Format.Age(now - f) : null,
+            }.Where(x => !string.IsNullOrEmpty(x)));
+            string Text(UsageWindow? w) => w is null ? (r is null ? "no reading yet" : "not reported") : Format.Reset(w.ResetsAt, now, zone, culture);
+            var message = s.Status == ProviderStatus.Pending ? "Loading…" : s.Status != ProviderStatus.Ok ? s.Message : null;
+            return new PanelProvider(s.Kind, s.DisplayName, detail.Length == 0 ? null : detail,
+                r?.Session, r?.Weekly,
+                Pace.ElapsedFraction(r?.Session, Pace.SessionLength, now),
+                Pace.ElapsedFraction(r?.Weekly, Pace.WeeklyLength, now),
+                Text(r?.Session), Text(r?.Weekly),
+                _history[s.Kind].Recent(now).ToArray(), now, message, Stale(s));
+        }).ToArray();
+        _panel?.SetContent(panel, _lightTaskbar);
+
         _tray?.UpdateTip(Format.Summary(snapshots));
+
+        // The widget's width may have changed (e.g. a provider signed in); re-fit it.
+        Arrange();
     }
 
     private void RefreshAll()
@@ -314,11 +585,18 @@ internal sealed class App : IDisposable
 
     private void ShowMenu(POINT at)
     {
+        _panel?.Hide();
         var menu = CreatePopupMenu();
         try
         {
+            var makeRoomLabel = _makeRoom && _reserver.Failure is not null
+                ? "Make room in the taskbar (not working here)"
+                : "Make room in the taskbar";
+
+            AppendMenuW(menu, MF_STRING, (UIntPtr)CmdDetails, "Show details");
             AppendMenuW(menu, MF_STRING, (UIntPtr)CmdRefresh, "Refresh now");
             AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null);
+            AppendMenuW(menu, MF_STRING | (_makeRoom ? MF_CHECKED : 0), (UIntPtr)CmdMakeRoom, makeRoomLabel);
             AppendMenuW(menu, MF_STRING | (SystemSettings.StartsWithWindows() ? MF_CHECKED : 0), (UIntPtr)CmdStartup, "Start with Windows");
             AppendMenuW(menu, MF_STRING, (UIntPtr)CmdOpenLog, "Open log folder");
             AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null);
@@ -334,8 +612,14 @@ internal sealed class App : IDisposable
 
             switch (command)
             {
+                case CmdDetails:
+                    TogglePanel(_band is { IsShown: true } ? null : new RECT { Left = at.X, Top = at.Y, Right = at.X + 1, Bottom = at.Y + 1 });
+                    break;
                 case CmdRefresh:
                     RefreshAll();
+                    break;
+                case CmdMakeRoom:
+                    SetMakeRoom(!_makeRoom);
                     break;
                 case CmdStartup:
                     SystemSettings.SetStartWithWindows(!SystemSettings.StartsWithWindows());
@@ -354,10 +638,28 @@ internal sealed class App : IDisposable
         }
     }
 
+    /// <summary>Turns "make room" on (retrying even after an earlier failure) or off.</summary>
+    private void SetMakeRoom(bool enabled)
+    {
+        _makeRoom = enabled;
+        SystemSettings.SetMakeRoom(enabled);
+        _reserver.Reset();
+        _reportedFailure = null;
+        ResetBacking();
+        _fit = BandFit.Full;
+        _probe.SetInterval(enabled ? SettledProbeInterval : DodgeProbeInterval);
+        _probe.ProbeSoon();
+        PushContent();
+        Arrange();
+    }
+
     private void Shutdown()
     {
         Log.Info("Exiting");
         KillTimer(_hwnd, LayoutTimer);
+        Unhook();
+        _reserver.Restore();
+        _panel?.Dispose();
         _band?.Destroy();
         _tray?.Hide();
         if (_hwnd != IntPtr.Zero && IsWindow(_hwnd)) DestroyWindow(_hwnd);
@@ -365,8 +667,11 @@ internal sealed class App : IDisposable
 
     public void Dispose()
     {
+        _probe.Dispose();
         foreach (var poller in _pollers) poller.Dispose();
+        _reserver.Restore();
         _band?.Dispose();
+        _panel?.Dispose();
         _tray?.Dispose();
         _http.Dispose();
     }
