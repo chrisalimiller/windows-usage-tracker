@@ -17,12 +17,12 @@ internal sealed record BandPalette(Color Text, Color Muted, Color Warning, Color
             Text: Color.FromArgb(255, 26, 26, 26), Muted: Color.FromArgb(150, 0, 0, 0),
             Warning: Color.FromArgb(255, 157, 93, 0), Critical: Color.FromArgb(255, 196, 43, 28),
             Hover: Color.FromArgb(18, 0, 0, 0), Track: Color.FromArgb(34, 0, 0, 0), Fill: Color.FromArgb(190, 0, 0, 0),
-            Claude: Color.FromArgb(255, 194, 96, 62), Codex: Color.FromArgb(255, 61, 111, 214))
+            Claude: Color.FromArgb(255, 198, 97, 63), Codex: Color.FromArgb(255, 66, 88, 214))
         : new BandPalette(
             Text: Color.FromArgb(255, 255, 255, 255), Muted: Color.FromArgb(165, 255, 255, 255),
             Warning: Color.FromArgb(255, 255, 185, 0), Critical: Color.FromArgb(255, 255, 99, 97),
             Hover: Color.FromArgb(24, 255, 255, 255), Track: Color.FromArgb(48, 255, 255, 255), Fill: Color.FromArgb(225, 255, 255, 255),
-            Claude: Color.FromArgb(255, 224, 138, 106), Codex: Color.FromArgb(255, 143, 176, 245));
+            Claude: Color.FromArgb(255, 217, 119, 87), Codex: Color.FromArgb(255, 123, 147, 255));
 
     public Color For(Severity severity) => severity switch
     {
@@ -37,6 +37,9 @@ internal sealed record BandPalette(Color Text, Color Muted, Color Warning, Color
         Severity.Warning => Warning,
         _ => Fill,
     };
+
+    /// <summary>A provider's bar: its brand color, turning amber or red as the limit gets close.</summary>
+    public Color BarFor(Severity severity, ProviderKind kind) => severity == Severity.Normal ? Accent(kind) : BarFor(severity);
 
     public Color Accent(ProviderKind kind) => kind == ProviderKind.Claude ? Claude : Codex;
 }
@@ -158,12 +161,12 @@ internal sealed class BandRenderer : IDisposable
             var row = rows[i];
             var y = layout.Top + i * (layout.LineHeight + layout.RowGap);
             DrawText(g, row.Label, _label!, row.NeedsAttention ? palette.Warning : palette.Text, offset + layout.LabelX, y);
-            DrawMeter(g, SessionPrefix, row.Session, row.Dim, palette, offset + layout.SessionX, y, layout);
-            DrawMeter(g, WeeklyPrefix, row.Weekly, row.Dim, palette, offset + layout.WeeklyX, y, layout);
+            DrawMeter(g, SessionPrefix, row.Kind, row.Session, row.Dim, palette, offset + layout.SessionX, y, layout);
+            DrawMeter(g, WeeklyPrefix, row.Kind, row.Weekly, row.Dim, palette, offset + layout.WeeklyX, y, layout);
         }
     }
 
-    private void DrawMeter(Graphics g, string prefix, UsageWindow? window, bool dim, BandPalette palette, float x, float y, Layout layout)
+    private void DrawMeter(Graphics g, string prefix, ProviderKind kind, UsageWindow? window, bool dim, BandPalette palette, float x, float y, Layout layout)
     {
         DrawText(g, prefix, _value!, palette.Muted, x, y);
 
@@ -171,7 +174,7 @@ internal sealed class BandRenderer : IDisposable
         var barY = y + (layout.LineHeight - layout.BarHeight) / 2f + layout.BarHeight * 0.15f;
         var severity = window is null ? Severity.Normal : Format.SeverityOf(window.UsedPercent);
         DrawBar(g, barX, barY, layout.BarWidth, layout.BarHeight, window?.UsedPercent, palette.Track,
-            window is null || dim ? palette.Muted : palette.BarFor(severity), tick: null, tickColor: palette.Text);
+            window is null || dim ? palette.Muted : palette.BarFor(severity, kind), tick: null, tickColor: palette.Text);
 
         var text = Format.Percent(window);
         var color = window is null || dim ? palette.Muted : palette.For(severity);
@@ -225,7 +228,7 @@ internal sealed class BandRenderer : IDisposable
 
             if (worst is not null && worst.UsedPercent > 0)
             {
-                var color = row.Dim ? palette.Muted : palette.BarFor(Format.SeverityOf(worst.UsedPercent));
+                var color = row.Dim ? palette.Muted : palette.BarFor(Format.SeverityOf(worst.UsedPercent), row.Kind);
                 using var pen = new Pen(color, stroke) { StartCap = LineCap.Round, EndCap = LineCap.Round };
                 g.DrawArc(pen, rect, -90, (float)(360 * Math.Min(100, worst.UsedPercent) / 100));
             }

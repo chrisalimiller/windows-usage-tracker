@@ -360,8 +360,8 @@ internal sealed class PanelRenderer : IDisposable
             }
 
             y += HeaderHeight * s + RowGap * s;
-            y = Row(g, "5-hour", p.Session, p.SessionPace, p.SessionText, p.Dim, x, right, y, s, palette);
-            y = Row(g, "Weekly", p.Weekly, p.WeeklyPace, p.WeeklyText, p.Dim, x, right, y, s, palette);
+            y = Row(g, "5-hour", accent, p.Session, p.SessionPace, p.SessionText, p.Dim, x, right, y, s, palette);
+            y = Row(g, "Weekly", accent, p.Weekly, p.WeeklyPace, p.WeeklyText, p.Dim, x, right, y, s, palette);
 
             // Last five hours of 5-hour usage, on a true time axis.
             Text(g, "Last 5h", _small!, palette.Muted, x, y + 2 * s);
@@ -381,15 +381,14 @@ internal sealed class PanelRenderer : IDisposable
         }
     }
 
-    private float Row(Graphics g, string label, UsageWindow? window, double? pace, string text, bool dim, float x, float right, float y, float s, PanelPalette palette)
+    private float Row(Graphics g, string label, Color accent, UsageWindow? window, double? pace, string text, bool dim, float x, float right, float y, float s, PanelPalette palette)
     {
         var band = palette.Band;
         var barX = x + LabelWidth * s;
         Text(g, label, _small!, palette.Muted, x, y - 4 * s);
         var severity = window is null ? Severity.Normal : Format.SeverityOf(window.UsedPercent);
-        var fill = window is null || dim ? palette.Muted : band.BarFor(severity);
-        // Bars use the panel's text color for "normal" so they read on the opaque card.
-        if (severity == Severity.Normal && window is not null && !dim) fill = Color.FromArgb(200, palette.Text);
+        // Brand color while there's room, amber or red as the limit gets close.
+        var fill = window is null || dim ? palette.Muted : severity == Severity.Normal ? accent : band.BarFor(severity);
         var track = Color.FromArgb(40, palette.Text);
         BandRenderer.DrawBar(g, barX, y, right - barX, BarHeight * s, window?.UsedPercent, track, fill, pace, palette.Text);
         y += BarHeight * s + 4 * s;

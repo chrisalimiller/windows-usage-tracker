@@ -9,7 +9,8 @@ Codex   5h ▱▱▱▱▱  0%  7d ▰▱▱▱▱ 14%
 ```
 
 - **5h** is the rolling 5-hour session limit, **7d** the weekly limit (percent used), each with a
-  small meter bar. Numbers and bars turn amber at 70% and red at 90%.
+  small meter bar. Bars are in each product's color (Claude orange, Codex blue); numbers and bars
+  turn amber at 70% and red at 90%.
 - **Click** for a details panel above the taskbar: bigger bars with a pace marker (where even use
   would put you right now), reset times, plan, and the last five hours of 5-hour usage.
 - Hover for the same details as a tooltip; right-click for **Show details**, **Refresh now**,
