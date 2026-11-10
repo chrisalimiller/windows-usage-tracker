@@ -3,7 +3,8 @@ using System.Text;
 namespace UsageTracker;
 
 /// <summary>
-/// Plain-text log in %LOCALAPPDATA%\WindowsUsageTracker. Problems are always logged;
+/// Plain-text log in %LOCALAPPDATA%\WindowsUsageTracker (or the package's LocalState folder in
+/// the Microsoft Store version, where Explorer can see it). Problems are always logged;
 /// window handles, rectangles and every poll are logged only with --diagnose.
 /// Tokens and response bodies are never logged.
 /// </summary>
@@ -12,7 +13,7 @@ internal static class Log
     private const long MaxBytes = 1024 * 1024;
     private static readonly object Gate = new();
 
-    public static string Directory { get; } = Path.Combine(
+    public static string Directory { get; } = PackageInfo.LocalStateFolder ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WindowsUsageTracker");
 
     public static string FilePath { get; } = Path.Combine(Directory, "usage-tracker.log");

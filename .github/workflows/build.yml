@@ -31,6 +31,21 @@ jobs:
       - name: Publish win-arm64
         run: dotnet publish src/UsageTracker -c Release -r win-arm64 --self-contained -p:PublishSingleFile=true -o out/win-arm64
 
+      - name: Publish Microsoft Store build
+        run: |
+          dotnet publish src/UsageTracker -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:StoreBuild=true -o out/store-x64
+          dotnet publish src/UsageTracker -c Release -r win-arm64 --self-contained -p:PublishSingleFile=true -p:StoreBuild=true -o out/store-arm64
+
+      - name: Package for the Microsoft Store
+        shell: pwsh
+        run: ./packaging/pack.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WindowsUsageTracker-Store
+          path: out/store/*.msixbundle
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@v4
         with:
           name: WindowsUsageTracker-win-x64
@@ -81,7 +96,8 @@ jobs:
           mkdir release
           cp artifacts/WindowsUsageTracker-win-x64/WindowsUsageTracker.exe "release/WindowsUsageTracker-$v-win-x64.exe"
           cp artifacts/WindowsUsageTracker-win-arm64/WindowsUsageTracker.exe "release/WindowsUsageTracker-$v-win-arm64.exe"
-          gh release create "v$v" release/*.exe \
+          cp artifacts/WindowsUsageTracker-Store/*.msixbundle release/
+          gh release create "v$v" release/*.exe release/*.msixbundle \
             --target "$GITHUB_SHA" \
             --title "Windows Usage Tracker $v" \
             --generate-notes

@@ -155,6 +155,50 @@ dotnet publish src/UsageTracker -c Release -r win-x64 --self-contained -p:Publis
 
 The solution also builds on Linux and macOS (`EnableWindowsTargeting`), but the app only runs on Windows.
 
+## Microsoft Store version
+
+The Store version avoids SmartScreen's "unknown app" warning, because Microsoft signs Store
+packages. It's the same app, built with `-p:StoreBuild=true` and packaged as MSIX (see
+`packaging/`). Two things work differently there:
+- **Start with Windows** uses the package's startup task, which also appears in
+  **Settings > Apps > Startup**.
+- **Open log folder** opens `%LOCALAPPDATA%\Packages\<package>\LocalState`.
+
+Every build makes `WindowsUsageTracker_<version>.0.msixbundle` (the **WindowsUsageTracker-Store**
+artifact). Releases attach it too. It's unsigned, so it's for uploading to Partner Center, not
+for installing directly.
+
+### Publishing it
+
+1. Create a free individual developer account at <https://storedeveloper.microsoft.com>.
+2. In Partner Center, create a new **MSIX or PWA app** and reserve its name.
+3. Open the app's **Product management > Product identity** and copy **Package/Identity/Name**,
+   **Package/Identity/Publisher** and **Package/Properties/PublisherDisplayName** into
+   `packaging/store-identity.json`. Merge that change so the next build carries them.
+4. Start a submission:
+   - **Packages:** upload the `.msixbundle` from that build.
+   - **Store listing:** add a description, at least one screenshot of the taskbar, and the
+     300×300 logo in `packaging/store-listing/`.
+   - **Privacy policy URL:** required, because the app reads Claude Code and Codex sign-ins.
+   - **Submission options:** explain the `runFullTrust` capability, for example: "Desktop app
+     that reads the user's Claude Code and Codex plan usage and shows it in the taskbar."
+5. Submit for certification.
+
+Make room resizes an undocumented Windows window, and Store policy 10.2.8 asks apps to change
+Windows only through supported methods. If certification rejects it for that, the fallback is a
+Store build without make room, which only dodges app buttons.
+
+### Testing the Store package before submitting
+
+With **Developer Mode** on (**Settings > System > For developers**), extract the `.msix` for
+your architecture from the bundle (both are zip files). Then, in that folder, run:
+
+```
+Add-AppxPackage -Register .\AppxManifest.xml
+```
+
+This installs it as a packaged app without signing. Remove it later from **Settings > Apps**.
+
 ## License
 
 GPL-3.0, see [LICENSE](LICENSE).

@@ -57,6 +57,7 @@ internal static class SystemSettings
 
     public static bool StartsWithWindows()
     {
+        if (PackageInfo.IsPackaged) return StoreStartup.IsEnabled();
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKey);
@@ -70,6 +71,12 @@ internal static class SystemSettings
 
     public static void SetStartWithWindows(bool enabled)
     {
+        if (PackageInfo.IsPackaged)
+        {
+            StoreStartup.SetEnabled(enabled);
+            return;
+        }
+
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey(RunKey);

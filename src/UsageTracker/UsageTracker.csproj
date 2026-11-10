@@ -13,6 +13,15 @@
     <!-- Interop structs and P/Invoke are declared by hand; silence "use LibraryImport" suggestions. -->
     <NoWarn>$(NoWarn);SYSLIB1054;CA1416</NoWarn>
   </PropertyGroup>
+  <!--
+    The Microsoft Store package is built with -p:StoreBuild=true. It targets the Windows SDK so it
+    can use the package's startup task; the plain exe stays on net8.0-windows and smaller.
+  -->
+  <PropertyGroup Condition="'$(StoreBuild)' == 'true'">
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <DefineConstants>$(DefineConstants);STORE</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.Drawing.Common" Version="8.0.10" />
   </ItemGroup>
