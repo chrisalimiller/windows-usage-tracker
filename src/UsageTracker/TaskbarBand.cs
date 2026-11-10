@@ -1,4 +1,6 @@
+using System.Drawing;
 using System.Runtime.InteropServices;
+using UsageTracker.Core;
 using UsageTracker.Native;
 using static UsageTracker.Native.Win32;
 
@@ -6,7 +8,8 @@ namespace UsageTracker;
 
 /// <summary>
 /// The widget window itself: a layered child window of the primary taskbar (Shell_TrayWnd),
-/// placed just left of the notification area (TrayNotifyWnd). It never floats: if it
+/// placed either in a strip freed at the right end of the taskbar (see <see cref="SpaceReserver"/>)
+/// or just left of the notification area (TrayNotifyWnd). It never floats: if it
 /// can't be a child of the taskbar, <see cref="TryAttach"/> fails and the caller shows
 /// a tray icon with the error instead.
 /// </summary>
@@ -20,19 +23,24 @@ internal sealed class TaskbarBand : IDisposable
 
     private IntPtr _hwnd;
     private IntPtr _taskbar;
-    private IntPtr _tooltip;
     private bool _destroying;
     private bool _trackingMouse;
     private bool _hover;
     private bool _loggedZOrder;
 
     private IReadOnlyList<BandRow> _rows = Array.Empty<BandRow>();
-    private string _tooltipText = string.Empty;
+    private RECT? _strip;
+    private BandFit _fit = BandFit.Full;
+    private int[]? _backing;
+    private bool _hidden;
+    private RECT _screenRect;
     private BandPalette _palette = BandPalette.For(lightTaskbar: false);
 
     // Last applied geometry, so the layout timer only moves/redraws on change.
     private RECT _lastTaskbar;
     private RECT _lastTray;
+    private RECT? _lastStrip;
+    private BandFit _lastFit;
     private uint _lastDpi;
     private int _lastWidth;
     private int _lastHeight;
@@ -47,8 +55,8 @@ internal sealed class TaskbarBand : IDisposable
     /// <summary>Raised on right-click with the cursor position in screen coordinates.</summary>
     public event Action<POINT>? ContextMenuRequested;
 
-    /// <summary>Raised on double-click.</summary>
-    public event Action? RefreshRequested;
+    /// <summary>Raised on a left click.</summary>
+    public event Action? Clicked;
 
     /// <summary>Raised when the window was destroyed by someone else (usually Explorer restarting).</summary>
     public event Action? Lost;
@@ -57,20 +65,42 @@ internal sealed class TaskbarBand : IDisposable
 
     public IntPtr Taskbar => _taskbar;
 
+    /// <summary>Where the widget is on screen (physical pixels), or empty when hidden.</summary>
+    public RECT ScreenRect => _hidden ? default : _screenRect;
+
+    public bool IsShown => _hwnd != IntPtr.Zero && !_hidden;
+
+    /// <summary>
+    /// Where to sit: a reserved strip at the right end of the taskbar ("make room"), or null to
+    /// sit just left of the tray in the given form ("dodge").
+    /// </summary>
+    public void SetPlacement(RECT? strip, BandFit fit, int[]? backing)
+    {
+        if (strip is { } s && s.Width <= 0) strip = null;
+        if (strip is null) backing = null;
+        var changed = !SameNullable(strip, _strip) || fit != _fit || !ReferenceEquals(backing, _backing);
+        _strip = strip;
+        _fit = strip is null ? fit : BandFit.Full;
+        if (!ReferenceEquals(backing, _backing)) _needsRender = true;
+        _backing = backing;
+        if (changed && _hwnd != IntPtr.Zero) UpdateLayout(force: false);
+    }
+
+    /// <summary>Full and compact widths for the current content at this taskbar height and DPI.</summary>
+    public (int Full, int Compact) Widths(TaskbarGeometry g)
+    {
+        var height = g.Horizontal ? g.TaskbarRect.Height : (int)Math.Round(48 * g.Scale);
+        return (MeasureWidth(height, g.Dpi, g.Scale), BandRenderer.MeasureCompactWidth(_rows, height, g.Scale));
+    }
     public bool IsAttachedTo(IntPtr taskbar) =>
         _hwnd != IntPtr.Zero && taskbar != IntPtr.Zero && _taskbar == taskbar
         && IsWindow(_hwnd) && GetParent(_hwnd) == taskbar;
 
-    public void SetContent(IReadOnlyList<BandRow> rows, string tooltip, BandPalette palette)
+    public void SetContent(IReadOnlyList<BandRow> rows, BandPalette palette)
     {
         _rows = rows;
         _palette = palette;
         _needsRender = true;
-        if (tooltip != _tooltipText)
-        {
-            _tooltipText = tooltip;
-            UpdateTooltipText();
-        }
 
         if (_hwnd != IntPtr.Zero) UpdateLayout(force: false);
     }
@@ -114,44 +144,64 @@ internal sealed class TaskbarBand : IDisposable
         _taskbar = taskbar;
         _lastTaskbar = default;
         _lastTray = default;
+        _lastStrip = null;
         _lastDpi = 0;
         _lastWidth = 0;
         _lastHeight = 0;
         _needsRender = true;
         _loggedZOrder = false;
 
-        CreateTooltip();
         UpdateLayout(force: true);
         ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
         Log.Info($"Embedded in taskbar 0x{taskbar.ToInt64():X} as child window 0x{_hwnd.ToInt64():X}");
         return true;
     }
 
-    /// <summary>Repositions and redraws if the taskbar, tray, DPI or content changed.</summary>
+    /// <summary>Repositions and redraws if the taskbar, tray, DPI, placement or content changed.</summary>
     public void UpdateLayout(bool force)
     {
         if (_hwnd == IntPtr.Zero || _taskbar == IntPtr.Zero) return;
+        if (TaskbarGeometry.Read(_taskbar) is not { } g) return;
 
-        var taskbarRect = WindowRect(_taskbar);
-        if (taskbarRect is not { } tb || tb.Width <= 0 || tb.Height <= 0) return;
+        var tb = g.TaskbarRect;
+        var trayRect = g.TrayRect;
+        var dpi = g.Dpi;
+        var scale = g.Scale;
 
-        var tray = FindWindowExW(_taskbar, IntPtr.Zero, "TrayNotifyWnd", null);
-        var trayRect = WindowRect(tray) ?? new RECT { Left = tb.Right, Right = tb.Right, Top = tb.Top, Bottom = tb.Bottom };
-        var dpi = GetDpiForWindow(_taskbar);
-        if (dpi == 0) dpi = 96;
-        var scale = dpi / 96f;
+        if (_strip is null && _fit == BandFit.Hidden)
+        {
+            if (!_hidden)
+            {
+                ShowWindow(_hwnd, SW_HIDE);
+                _hidden = true;
+                Log.Verbose("Layout: hidden, the app buttons left no room");
+            }
 
-        var horizontal = tb.Width >= tb.Height;
+            _lastFit = BandFit.Hidden;
+            return;
+        }
+
+        var horizontal = g.Horizontal;
         var height = horizontal ? tb.Height : (int)Math.Round(48 * scale);
-        var width = MeasureWidth(height, dpi, scale);
+        var width = _fit == BandFit.Compact && _strip is null
+            ? BandRenderer.MeasureCompactWidth(_rows, height, scale)
+            : MeasureWidth(height, dpi, scale);
 
-        var geometryChanged = force || !Same(tb, _lastTaskbar) || !Same(trayRect, _lastTray) || dpi != _lastDpi
-            || width != _lastWidth || height != _lastHeight;
+        var geometryChanged = force || _hidden || !Same(tb, _lastTaskbar) || !Same(trayRect, _lastTray) || dpi != _lastDpi
+            || width != _lastWidth || height != _lastHeight || !SameNullable(_strip, _lastStrip) || _fit != _lastFit;
 
         if (geometryChanged)
         {
             int screenX, screenY;
-            if (horizontal)
+            if (_strip is { } strip)
+            {
+                // "Make room": fill the freed strip at the right end; the content is centered in it.
+                screenX = strip.Left;
+                width = strip.Width;
+                height = strip.Height;
+                screenY = strip.Top;
+            }
+            else if (horizontal)
             {
                 var gap = (int)Math.Round(4 * scale);
                 screenX = Math.Max(tb.Left, trayRect.Left - width - gap);
@@ -168,14 +218,18 @@ internal sealed class TaskbarBand : IDisposable
             var point = new POINT { X = screenX, Y = screenY };
             MapWindowPoints(IntPtr.Zero, _taskbar, ref point, 1);
             SetWindowPos(_hwnd, HWND_TOP, point.X, point.Y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            _hidden = false;
+            _screenRect = new RECT { Left = screenX, Top = screenY, Right = screenX + width, Bottom = screenY + height };
 
-            Log.Verbose($"Layout: taskbar {tb} tray {trayRect} (0x{tray.ToInt64():X}) dpi {dpi} -> widget {width}x{height} at screen ({screenX},{screenY}) client ({point.X},{point.Y})");
+            Log.Verbose($"Layout: taskbar {tb} tray {trayRect} dpi {dpi} {(_strip is null ? $"dodge/{_fit}" : "make-room strip")} -> widget {width}x{height} at screen ({screenX},{screenY})");
 
             _lastTaskbar = tb;
             _lastTray = trayRect;
             _lastDpi = dpi;
             _lastWidth = width;
             _lastHeight = height;
+            _lastStrip = _strip;
+            _lastFit = _fit;
             _needsRender = true;
         }
 
@@ -227,7 +281,8 @@ internal sealed class TaskbarBand : IDisposable
     private void Present(int width, int height, float scale)
     {
         if (width <= 0 || height <= 0) return;
-        var pixels = _renderer.Render(_rows, width, height, scale, _palette, _hover);
+        var style = new BandStyle(Compact: _strip is null && _fit == BandFit.Compact, _hover, _backing);
+        var pixels = _renderer.Render(_rows, width, height, scale, _palette, style);
 
         var screenDc = GetDC(IntPtr.Zero);
         var memDc = CreateCompatibleDC(screenDc);
@@ -284,57 +339,6 @@ internal sealed class TaskbarBand : IDisposable
         }
     }
 
-    private void CreateTooltip()
-    {
-        _tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASS, null, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
-            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, _owner, IntPtr.Zero, _instance, IntPtr.Zero);
-        if (_tooltip == IntPtr.Zero)
-        {
-            Log.Error($"Couldn't create the tooltip (error {Marshal.GetLastWin32Error()})");
-            return;
-        }
-
-        var text = Marshal.StringToHGlobalUni(_tooltipText.Length == 0 ? "Windows Usage Tracker" : _tooltipText);
-        try
-        {
-            var info = ToolInfo(text);
-            SendMessageW(_tooltip, TTM_ADDTOOLW, IntPtr.Zero, ref info);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(text);
-        }
-
-        SendMessageW(_tooltip, TTM_SETMAXTIPWIDTH, IntPtr.Zero, new IntPtr(800));
-        SendMessageW(_tooltip, TTM_SETDELAYTIME, new IntPtr(TTDT_AUTOPOP), new IntPtr(30000));
-    }
-
-    private void UpdateTooltipText()
-    {
-        if (_tooltip == IntPtr.Zero) return;
-        var text = Marshal.StringToHGlobalUni(_tooltipText);
-        try
-        {
-            var info = ToolInfo(text);
-            SendMessageW(_tooltip, TTM_UPDATETIPTEXTW, IntPtr.Zero, ref info);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(text);
-        }
-    }
-
-    private TOOLINFO ToolInfo(IntPtr text) => new()
-    {
-        cbSize = (uint)Marshal.SizeOf<TOOLINFO>(),
-        uFlags = TTF_IDISHWND | TTF_SUBCLASS,
-        // Notifications go to our own hidden window, never to Explorer's taskbar.
-        hwnd = _owner,
-        uId = (UIntPtr)(ulong)_hwnd.ToInt64(),
-        hinst = _instance,
-        lpszText = text,
-    };
-
     /// <summary>Window procedure for the band window class.</summary>
     public IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
@@ -382,8 +386,8 @@ internal sealed class TaskbarBand : IDisposable
                 if (GetCursorPos(out var pt)) ContextMenuRequested?.Invoke(pt);
                 return IntPtr.Zero;
 
-            case WM_LBUTTONDBLCLK:
-                RefreshRequested?.Invoke();
+            case WM_LBUTTONUP:
+                Clicked?.Invoke();
                 return IntPtr.Zero;
 
             case WM_DPICHANGED_AFTERPARENT:
@@ -396,7 +400,6 @@ internal sealed class TaskbarBand : IDisposable
                     Log.Info("Widget window was destroyed by its parent (Explorer restarted?)");
                     _hwnd = IntPtr.Zero;
                     _taskbar = IntPtr.Zero;
-                    DestroyTooltip();
                     Lost?.Invoke();
                 }
 
@@ -406,18 +409,8 @@ internal sealed class TaskbarBand : IDisposable
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
-    private void DestroyTooltip()
-    {
-        if (_tooltip != IntPtr.Zero)
-        {
-            DestroyWindow(_tooltip);
-            _tooltip = IntPtr.Zero;
-        }
-    }
-
     public void Destroy()
     {
-        DestroyTooltip();
         if (_hwnd != IntPtr.Zero)
         {
             _destroying = true;
@@ -429,7 +422,11 @@ internal sealed class TaskbarBand : IDisposable
         _taskbar = IntPtr.Zero;
         _trackingMouse = false;
         _hover = false;
+        _hidden = false;
     }
+
+    private static bool SameNullable(RECT? a, RECT? b) =>
+        a is { } x ? b is { } y && Same(x, y) : b is null;
 
     private static bool Same(RECT a, RECT b) =>
         a.Left == b.Left && a.Top == b.Top && a.Right == b.Right && a.Bottom == b.Bottom;
