@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>WindowsUsageTracker</AssemblyName>
+    <RootNamespace>UsageTracker</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- Used by `dotnet publish -r win-x64` / `-r win-arm64` (see the GitHub workflow). -->
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Interop structs and P/Invoke are declared by hand; silence "use LibraryImport" suggestions. -->
+    <NoWarn>$(NoWarn);SYSLIB1054;CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="8.0.10" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\UsageTracker.Core\UsageTracker.Core.csproj" />
+  </ItemGroup>
+</Project>
