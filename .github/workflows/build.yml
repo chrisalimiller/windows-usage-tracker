@@ -42,3 +42,46 @@ jobs:
           name: WindowsUsageTracker-win-arm64
           path: out/win-arm64/WindowsUsageTracker.exe
           if-no-files-found: error
+
+  # On main, publish a GitHub release for the version in Directory.Build.props,
+  # once per version, with both exes attached.
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props | head -n1)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v4
+        if: steps.version.outputs.exists == 'false'
+        with:
+          path: artifacts
+
+      - name: Create release
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          v=${{ steps.version.outputs.version }}
+          mkdir release
+          cp artifacts/WindowsUsageTracker-win-x64/WindowsUsageTracker.exe "release/WindowsUsageTracker-$v-win-x64.exe"
+          cp artifacts/WindowsUsageTracker-win-arm64/WindowsUsageTracker.exe "release/WindowsUsageTracker-$v-win-arm64.exe"
+          gh release create "v$v" release/*.exe \
+            --target "$GITHUB_SHA" \
+            --title "Windows Usage Tracker $v" \
+            --generate-notes

@@ -49,10 +49,12 @@ A provider that isn't signed in anywhere is hidden; if neither is, both rows sho
 
 ## Install and run
 
-1. Open the latest successful run of the **build** workflow in this repo's **Actions** tab
-   (or the **Checks** tab of a pull request) and download the artifact
-   **WindowsUsageTracker-win-x64** (or **-win-arm64** for an ARM PC). It's a zip with one file.
-2. Put `WindowsUsageTracker.exe` somewhere permanent, for example
+1. Open this repo's **Releases** and download `WindowsUsageTracker-<version>-win-x64.exe`
+   (or `-win-arm64.exe` for an ARM PC) from the latest release. Each merge to main that raises
+   the version in `Directory.Build.props` publishes a new release. For an unreleased test build,
+   download the **WindowsUsageTracker-win-x64** artifact (a zip with one file) from the latest
+   successful run of the **build** workflow in the **Actions** tab instead.
+2. Put the exe somewhere permanent, for example
    `%LOCALAPPDATA%\Programs\WindowsUsageTracker\`.
 3. Double-click it. The exe isn't code-signed yet, so SmartScreen may warn you the first
    time: choose **More info → Run anyway**.
